@@ -5,7 +5,7 @@
 # ///
 """
 Fetch Speedometer3 score-internal data from mozilla-central,
-grouped by NUC machine number.
+grouped by CI machine.
 
 Usage:
     uv run nuc_performance_analysis.py
@@ -100,32 +100,54 @@ def stdev(values):
 
 
 def classify_groups(nuc_data):
-    """Detect bimodal grouping via largest-gap splitting on per-machine averages."""
-    machine_avgs = {}
-    for machine, data in nuc_data.items():
-        machine_avgs[machine] = sum(d["value"] for d in data) / len(data)
-
-    sorted_avgs = sorted(machine_avgs.values())
-    if len(sorted_avgs) < 2:
+    """Detect bimodal grouping by finding the sparsest region in the data."""
+    all_values = sorted(
+        d["value"] for data in nuc_data.values() for d in data
+    )
+    if len(all_values) < 4:
         return None
 
-    gaps = []
-    for i in range(len(sorted_avgs) - 1):
-        gaps.append((sorted_avgs[i + 1] - sorted_avgs[i], i))
-    gaps.sort(reverse=True)
-    best_gap, best_idx = gaps[0]
-    split = (sorted_avgs[best_idx] + sorted_avgs[best_idx + 1]) / 2
-
-    median_gap = sorted(g for g, _ in gaps)[len(gaps) // 2]
-    if best_gap < 3 * median_gap or best_gap < 0.3:
+    data_range = all_values[-1] - all_values[0]
+    if data_range < 0.5:
         return None
+
+    # Slide a window across the sorted values and find the region with fewest
+    # points relative to its width -- this finds the "sparse zone" between modes
+    window = data_range * 0.15
+    best_score = float("inf")
+    best_center = None
+    step = data_range / 200
+    lo = all_values[0] + window / 2
+    hi = all_values[-1] - window / 2
+    if lo >= hi:
+        return None
+
+    pos = lo
+    while pos <= hi:
+        count = sum(1 for v in all_values if pos - window / 2 <= v <= pos + window / 2)
+        density = count / len(all_values)
+        below = sum(1 for v in all_values if v < pos - window / 2)
+        above = sum(1 for v in all_values if v > pos + window / 2)
+        if below >= len(all_values) * 0.1 and above >= len(all_values) * 0.1:
+            if density < best_score:
+                best_score = density
+                best_center = pos
+        pos += step
+
+    if best_center is None or best_score > 0.15:
+        return None
+
+    split = best_center
+    below_split = [v for v in all_values if v < split]
+    above_split = [v for v in all_values if v >= split]
+    gap = above_split[0] - below_split[-1] if below_split and above_split else 0
 
     low, high, mixed = [], [], []
     for machine, data in sorted(nuc_data.items()):
         values = [d["value"] for d in data]
+        avg = sum(values) / len(values)
         below = [v for v in values if v < split]
         above = [v for v in values if v >= split]
-        avg = machine_avgs[machine]
         entry = {"machine": machine, "avg": avg, "n": len(values),
                  "n_low": len(below), "n_high": len(above)}
         if below and above:
@@ -141,15 +163,22 @@ def classify_groups(nuc_data):
 
     low_vals = [v for m in low for d in nuc_data[m["machine"]] for v in [d["value"]]]
     high_vals = [v for m in high for d in nuc_data[m["machine"]] for v in [d["value"]]]
+    low_mean = sum(low_vals) / len(low_vals) if low_vals else 0
+    high_mean = sum(high_vals) / len(high_vals) if high_vals else 0
+
+    n_low_pts = sum(1 for v in all_values if v < split)
+    n_high_pts = len(all_values) - n_low_pts
 
     return {
         "split": split,
-        "gap": best_gap,
+        "gap": gap,
         "low": low,
         "high": high,
         "mixed": mixed,
-        "low_mean": sum(low_vals) / len(low_vals) if low_vals else 0,
-        "high_mean": sum(high_vals) / len(high_vals) if high_vals else 0,
+        "low_mean": low_mean,
+        "high_mean": high_mean,
+        "n_low_pts": n_low_pts,
+        "n_high_pts": n_high_pts,
     }
 
 
@@ -212,7 +241,7 @@ def print_analysis(nuc_data, suite, application, platform):
     print(f"\n{'=' * 70}")
     print(f"score-internal: {suite} ({application}) on {platform}")
     print(f"{'=' * 70}")
-    print(f"\n  Overall ({stats['n_points']} points across {stats['n_machines']} NUCs)")
+    print(f"\n  Overall ({stats['n_points']} points across {stats['n_machines']} machines)")
     print(f"    mean:    {stats['mean']:.2f}")
     print(f"    stdev:   {stats['stdev']:.2f} ({stats['stdev'] / stats['mean'] * 100:.1f}%)")
     print(f"    min:     {stats['min']:.2f}")
@@ -222,8 +251,8 @@ def print_analysis(nuc_data, suite, application, platform):
     groups = stats["groups"]
     if groups:
         print(f"\n  Bimodal group analysis (gap={groups['gap']:.2f}, split at {groups['split']:.2f}):")
-        print(f"    LOW  group: {len(groups['low']):>3} machines, mean={groups['low_mean']:.2f}")
-        print(f"    HIGH group: {len(groups['high']):>3} machines, mean={groups['high_mean']:.2f}")
+        print(f"    LOW  group: {len(groups['low']):>3} machines ({groups['n_low_pts']} pts), mean={groups['low_mean']:.2f}")
+        print(f"    HIGH group: {len(groups['high']):>3} machines ({groups['n_high_pts']} pts), mean={groups['high_mean']:.2f}")
         if groups["mixed"]:
             print(f"    MIXED:      {len(groups['mixed']):>3} machines (points in both groups)")
             for e in groups["mixed"]:
@@ -362,6 +391,12 @@ def generate_html_report(nuc_data, suite, application, platform, days):
             mixed_rows = f"<p>Mixed machines: {mixed_items}</p>"
         else:
             mixed_rows = "<p>No machines cross between groups.</p>"
+        low_list = ", ".join(html_escape(e["machine"]) for e in groups["low"])
+        high_list = ", ".join(html_escape(e["machine"]) for e in groups["high"])
+        mixed_list = ", ".join(
+            f"{html_escape(e['machine'])} ({e['n_low']} low, {e['n_high']} high)"
+            for e in groups["mixed"]
+        ) if groups["mixed"] else "(none)"
         group_section = f"""
 <h2>Bimodal Group Analysis</h2>
 <p>Largest gap: <strong>{groups['gap']:.2f}</strong> (split at {groups['split']:.2f})</p>
@@ -370,7 +405,9 @@ def generate_html_report(nuc_data, suite, application, platform, days):
   <div class="stat"><div class="value">{len(groups['high'])}</div><div class="label">HIGH machines (mean {groups['high_mean']:.2f})</div></div>
   <div class="stat"><div class="value">{len(groups['mixed'])}</div><div class="label">MIXED machines</div></div>
 </div>
-{mixed_rows}"""
+<p><strong>LOW:</strong> {low_list}</p>
+<p><strong>HIGH:</strong> {high_list}</p>
+<p><strong>MIXED:</strong> {mixed_list}</p>"""
 
     machine_rows = ""
     for m in stats["machines"]:
@@ -413,7 +450,7 @@ def generate_html_report(nuc_data, suite, application, platform, days):
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>NUC Performance Report - {html_escape(suite)}</title>
+<title>CI Machine Performance Report - {html_escape(suite)}</title>
 <style>
 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 2em; color: #333; }}
 h1 {{ border-bottom: 2px solid #333; padding-bottom: 0.3em; }}
