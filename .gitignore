@@ -3,3 +3,5 @@
 *.md
 !README*.md
 .claude/
+.venv/
+__pycache__/

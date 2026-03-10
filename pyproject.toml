@@ -1,0 +1,11 @@
+[project]
+name = "perf-ci-machine-analysis"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp",
+    "matplotlib",
+]
+
+[project.scripts]
+perf-analysis = "nuc_performance_analysis:main"
