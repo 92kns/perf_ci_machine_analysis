@@ -471,7 +471,7 @@ tr.mixed {{ background: #cce5ff; }}
 </style>
 </head>
 <body>
-<h1>NUC Performance Report</h1>
+<h1>CI Machine Performance Report</h1>
 <p><strong>{html_escape(suite)}</strong> ({html_escape(application)}) on <code>{html_escape(platform)}</code> | Last {days} days</p>
 
 <div class="summary">
@@ -521,7 +521,7 @@ def generate_md_report(nuc_data, suite, application, platform, days):
     stats = compute_stats(nuc_data)
 
     lines = []
-    lines.append(f"# NUC Performance Report\n")
+    lines.append(f"# CI Machine Performance Report\n")
     lines.append(f"**{suite}** ({application}) on `{platform}` | Last {days} days\n")
 
     lines.append(f"## Summary\n")
@@ -667,7 +667,7 @@ async def run(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Speedometer3 score-internal by NUC machine"
+        description="Speedometer3 score-internal by CI machine"
     )
     parser.add_argument("--repo", default="mozilla-central")
     parser.add_argument("--framework", type=int, default=13, help="13=browsertime")
@@ -675,7 +675,7 @@ def main():
     parser.add_argument("--platform", default="windows11-64-24h2-shippable")
     parser.add_argument("--application", default="firefox")
     parser.add_argument("--days", type=int, default=14)
-    parser.add_argument("--machines", nargs="+", help="Filter to specific NUCs")
+    parser.add_argument("--machines", nargs="+", help="Filter to specific machines")
     parser.add_argument("--csv", help="Export results to CSV")
     parser.add_argument("--report", help="Generate report (.html or .md)")
     args = parser.parse_args()
