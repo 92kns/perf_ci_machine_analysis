@@ -4,16 +4,13 @@
 # dependencies = ["aiohttp", "matplotlib"]
 # ///
 """
-Fetch Speedometer3 score-internal data from mozilla-central,
-grouped by CI machine.
+Fetch perfherder data from Treeherder, grouped by CI machine.
 
 Usage:
-    uv run nuc_performance_analysis.py
-    uv run nuc_performance_analysis.py --days 30
-    uv run nuc_performance_analysis.py --days 14 --machines nuc13-100 nuc13-108
-    uv run nuc_performance_analysis.py --days 14 --csv results.csv
-    uv run nuc_performance_analysis.py --days 14 --report report.html
-    uv run nuc_performance_analysis.py --days 14 --report report.md
+    uv run nuc_performance_analysis.py --platform windows11-64-24h2-shippable --days 30
+    uv run nuc_performance_analysis.py --platform macosx1470-64-shippable --days 60
+    uv run nuc_performance_analysis.py 5276830 --days 30
+    uv run nuc_performance_analysis.py 5276830 --days 14 --report report.html
 """
 
 import argparse
@@ -41,30 +38,31 @@ async def fetch_json(session, url):
         return await resp.json()
 
 
-async def find_signatures(session, repo, framework, suite, platform, application):
-    """Find parent and score-internal subtest signature IDs."""
+async def find_signatures(session, repo, framework, suite, platform, application,
+                          test="score-internal"):
+    """Find parent and subtest signature IDs."""
     url = f"{TREEHERDER}/api/project/{repo}/performance/signatures/"
     url += f"?framework={framework}&platform={platform}"
 
     data = await fetch_json(session, url)
 
     parent_id = None
-    score_internal_id = None
+    test_id = None
 
     for _, sig in data.items():
         if sig.get("suite") != suite or sig.get("application") != application:
             continue
         if sig.get("test") is None:
             parent_id = sig["id"]
-        elif sig.get("test") == "score-internal":
-            score_internal_id = sig["id"]
+        elif sig.get("test") == test:
+            test_id = sig["id"]
 
-    if not score_internal_id:
+    if not test_id:
         raise Exception(
-            f"No score-internal signature for {suite}/{application} on {platform}"
+            f"No '{test}' signature for {suite}/{application} on {platform}"
         )
 
-    return parent_id, score_internal_id
+    return parent_id, test_id
 
 
 async def fetch_perf_data(session, repo, framework, sig_id, days):
@@ -235,11 +233,11 @@ def compute_stats(nuc_data):
     }
 
 
-def print_analysis(nuc_data, suite, application, platform):
+def print_analysis(nuc_data, label):
     stats = compute_stats(nuc_data)
 
     print(f"\n{'=' * 70}")
-    print(f"score-internal: {suite} ({application}) on {platform}")
+    print(label)
     print(f"{'=' * 70}")
     print(f"\n  Overall ({stats['n_points']} points across {stats['n_machines']} machines)")
     print(f"    mean:    {stats['mean']:.2f}")
@@ -374,7 +372,7 @@ def _fig_to_svg(fig):
 
 # -- Report generation --
 
-def generate_html_report(nuc_data, suite, application, platform, days):
+def generate_html_report(nuc_data, label, days):
     stats = compute_stats(nuc_data)
     groups = stats["groups"]
     svg_timeseries = generate_time_series_chart(nuc_data, groups)
@@ -450,7 +448,7 @@ def generate_html_report(nuc_data, suite, application, platform, days):
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>CI Machine Performance Report - {html_escape(suite)}</title>
+<title>CI Machine Performance Report</title>
 <style>
 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 2em; color: #333; }}
 h1 {{ border-bottom: 2px solid #333; padding-bottom: 0.3em; }}
@@ -472,7 +470,7 @@ tr.mixed {{ background: #cce5ff; }}
 </head>
 <body>
 <h1>CI Machine Performance Report</h1>
-<p><strong>{html_escape(suite)}</strong> ({html_escape(application)}) on <code>{html_escape(platform)}</code> | Last {days} days</p>
+<p>{html_escape(label)} | Last {days} days</p>
 
 <div class="summary">
   <div class="stat"><div class="value">{stats['n_points']}</div><div class="label">Data Points</div></div>
@@ -517,12 +515,12 @@ tr.mixed {{ background: #cce5ff; }}
     return html
 
 
-def generate_md_report(nuc_data, suite, application, platform, days):
+def generate_md_report(nuc_data, label, days):
     stats = compute_stats(nuc_data)
 
     lines = []
     lines.append(f"# CI Machine Performance Report\n")
-    lines.append(f"**{suite}** ({application}) on `{platform}` | Last {days} days\n")
+    lines.append(f"{label} | Last {days} days\n")
 
     lines.append(f"## Summary\n")
     lines.append(f"| Metric | Value |")
@@ -583,16 +581,23 @@ def generate_md_report(nuc_data, suite, application, platform, days):
 
 async def run(args):
     async with aiohttp.ClientSession() as session:
-        print(f"Finding signatures for {args.suite}/{args.application} on {args.platform}...")
-        parent_id, score_internal_id = await find_signatures(
-            session, args.repo, args.framework,
-            args.suite, args.platform, args.application,
-        )
-        print(f"  score-internal signature: {score_internal_id}")
+        if args.signature:
+            sig_id = args.signature
+            label = f"signature {sig_id}"
+            print(f"Using signature {sig_id}")
+        else:
+            print(f"Finding signatures for {args.suite}/{args.application} on {args.platform}...")
+            parent_id, sig_id = await find_signatures(
+                session, args.repo, args.framework,
+                args.suite, args.platform, args.application,
+                args.test,
+            )
+            label = f"{args.test}: {args.suite} ({args.application}) on {args.platform}"
+            print(f"  {args.test} signature: {sig_id}")
 
-        print(f"Fetching {args.days} days of score-internal data...")
+        print(f"Fetching {args.days} days of data...")
         points = await fetch_perf_data(
-            session, args.repo, args.framework, score_internal_id, args.days,
+            session, args.repo, args.framework, sig_id, args.days,
         )
         print(f"  {len(points)} data points")
         if not points:
@@ -626,7 +631,7 @@ async def run(args):
             print("No data matched the specified machines!")
             return
 
-        print_analysis(nuc_data, args.suite, args.application, args.platform)
+        print_analysis(nuc_data, label)
 
         if not args.report:
             print_time_series(nuc_data)
@@ -650,13 +655,9 @@ async def run(args):
         if args.report:
             ext = args.report.rsplit(".", 1)[-1].lower()
             if ext == "html":
-                content = generate_html_report(
-                    nuc_data, args.suite, args.application, args.platform, args.days,
-                )
+                content = generate_html_report(nuc_data, label, args.days)
             elif ext == "md":
-                content = generate_md_report(
-                    nuc_data, args.suite, args.application, args.platform, args.days,
-                )
+                content = generate_md_report(nuc_data, label, args.days)
             else:
                 print(f"Unknown report format '.{ext}', use .html or .md")
                 return
@@ -667,18 +668,25 @@ async def run(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Speedometer3 score-internal by CI machine"
+        description="Perfherder score analysis by CI machine"
     )
+    parser.add_argument("signature", nargs="?", type=int,
+                        help="Perfherder signature ID (skip auto-detection)")
     parser.add_argument("--repo", default="mozilla-central")
     parser.add_argument("--framework", type=int, default=13, help="13=browsertime")
     parser.add_argument("--suite", default="speedometer3")
-    parser.add_argument("--platform", default="windows11-64-24h2-shippable")
+    parser.add_argument("--platform", help="Platform identifier (required unless signature given)")
+    parser.add_argument("--test", default="score-internal", help="Subtest name")
     parser.add_argument("--application", default="firefox")
     parser.add_argument("--days", type=int, default=14)
     parser.add_argument("--machines", nargs="+", help="Filter to specific machines")
     parser.add_argument("--csv", help="Export results to CSV")
     parser.add_argument("--report", help="Generate report (.html or .md)")
     args = parser.parse_args()
+
+    if not args.signature and not args.platform:
+        parser.error("either provide a signature ID or --platform")
+
     asyncio.run(run(args))
 
 
